@@ -1,0 +1,12 @@
+gpt2_env/
+transformer_env/
+__pycache__/
+*.pyc
+tokenizers/
+*.pt
+*.pth
+wandb/
+.DS_Store
+*.egg-info/
+dist/
+build/
