@@ -44,6 +44,11 @@ def get_ds(config):
     tokenizer_src = get_or_build_tokenizer(config, ds_raw, config['lang_src'])
     tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, config['lang_tgt'])
     
+    ds_raw = ds_raw.filter(lambda x: 
+        len(tokenizer_src.encode(x['translation']['en']).ids) <= config['seq_len']-2 and 
+        len(tokenizer_tgt.encode(x['translation']['zh']).ids) <= config['seq_len']-1
+    )
+    print(f"Dataset size after filtering: {len(ds_raw)}")
     # Keep 90% for training and 10% for validation
     train_ds_size = int(0.9 * len(ds_raw))
     val_ds_size = len(ds_raw) - train_ds_size
