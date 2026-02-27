@@ -1,81 +1,90 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset
 
-from dataset import BilingualDataset, causal_mask
-from model import build_transformer
+class BilingualDataset(Dataset):
 
-from datasets import load_dataset
-from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.trainers import WordLevelTrainer
-from tokenizers.pre_tokenizers import Whitespace
+    def __init__(self, ds, tokenizer_src, tokenizer_tgt, src_lang, tgt_lang, seq_len):
+        super().__init__()
+        self.seq_len = seq_len
 
-from pathlib import Path
-from torch.utils.tensorboard import SummaryWriter
+        self.ds = ds
+        self.tokenizer_src = tokenizer_src
+        self.tokenizer_tgt = tokenizer_tgt
+        self.src_lang = src_lang
+        self.tgt_lang = tgt_lang
 
-def get_all_sentences(ds, lang):
-    for item in ds:
-        yield item['translation'][lang]
-        
-def get_or_build_tokenizer(config, ds, lang):
-    # config['tokenizer_file'] = '../tokenizers/tokenizer_{0}.json'
-    tokenizer_path = Path(config['tokenizer_file'].format(lang))
-    if not Path.exists(tokenizer_path):
-        tokenizer = Tokenizer(WordLevel(unk_token='[UNK]'))
-        tokenizer.pre_tokenizer = Whitespace()
-        trainer = WordLevelTrainer(special_tokens=["[UNK]", "[PAD]", "[SOS]", "[EOS]"], min_frequency=2)
-        tokenizer.train_from_iterator(get_all_sentences(ds, lang), trainer=trainer)
-        tokenizer.save(str(tokenizer_path))
-    else:
-        tokenizer = Tokenizer.from_file(str(tokenizer_path))
-    return tokenizer
+        self.sos_token = torch.tensor([tokenizer_tgt.token_to_id("[SOS]")], dtype=torch.int64)
+        self.eos_token = torch.tensor([tokenizer_tgt.token_to_id("[EOS]")], dtype=torch.int64)
+        self.pad_token = torch.tensor([tokenizer_tgt.token_to_id("[PAD]")], dtype=torch.int64)
 
-def get_ds(config):
-    ds_raw = load_dataset('opus_books',f'{config["lang_src"]}-{config["lang_tgt"]}', split='train')
-    
-    #Build tokenizer
-    tokenizer_src = get_or_build_tokenizer(config, ds_raw, config['lang_src'])
-    tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, config['lang_tgt'])
-    
-    # keep 90% for training and 10% for validation
-    train_ds_size = int(0.9 * len(ds_raw))
-    val_ds_size = len(ds_raw) - train_ds_size
-    train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size, val_ds_size])
-    
-    train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
-    val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
-    
-    max_len_src = 0
-    max_len_tgt = 0
-    
-    for item in ds_raw:
-        src_ids = tokenizer_src.encode(item['translation'][config['lang_src']]).ids
-        tgt_ids = tokenizer_tgt.encode(item['translation'][config['lang_tgt']]).ids
-        max_len_tgt = max(max_len_tgt, len(tgt_ids))
-        max_len_src = max(max_len_src, len(src_ids))
-        
-    print(f"Max length of source sentence: {max_len_src}")
-    print(f"Max length of target sentence: {max_len_tgt}")
-    
-    train_dataloader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True)
-    val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
-    
-    return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
+    def __len__(self):
+        return len(self.ds)
 
-def get_model(config, vocab_src_len, vocab_tgt_len):
-    model = build_transformer(vocab_src_len, vocab_tgt_len, config['seq_len'], config['seq_len'], config['d_model'])
-    return model
+    def __getitem__(self, idx):
+        src_target_pair = self.ds[idx]
+        src_text = src_target_pair['translation'][self.src_lang]
+        tgt_text = src_target_pair['translation'][self.tgt_lang]
 
-def train_model(config):
-    # Define the device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device {device}")
+        # Transform the text into tokens
+        enc_input_tokens = self.tokenizer_src.encode(src_text).ids
+        dec_input_tokens = self.tokenizer_tgt.encode(tgt_text).ids
+
+        # Add sos, eos and padding to each sentence
+        enc_num_padding_tokens = self.seq_len - len(enc_input_tokens) - 2  # We will add <s> and </s>
+        # We will only add <s>, and </s> only on the label
+        dec_num_padding_tokens = self.seq_len - len(dec_input_tokens) - 1
+
+        # Make sure the number of padding tokens is not negative. If it is, the sentence is too long
+        if enc_num_padding_tokens < 0 or dec_num_padding_tokens < 0:
+            raise ValueError("Sentence is too long")
+
+        # Add <s> and </s> token
+        encoder_input = torch.cat(
+            [
+                self.sos_token,
+                torch.tensor(enc_input_tokens, dtype=torch.int64),
+                self.eos_token,
+                torch.tensor([self.pad_token] * enc_num_padding_tokens, dtype=torch.int64),
+            ],
+            dim=0,
+        )
+
+        # Add only <s> token
+        decoder_input = torch.cat(
+            [
+                self.sos_token,
+                torch.tensor(dec_input_tokens, dtype=torch.int64),
+                torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype=torch.int64),
+            ],
+            dim=0,
+        )
+
+        # Add only </s> token
+        label = torch.cat(
+            [
+                torch.tensor(dec_input_tokens, dtype=torch.int64),
+                self.eos_token,
+                torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype=torch.int64),
+            ],
+            dim=0,
+        )
+
+        # Double check the size of the tensors to make sure they are all seq_len long
+        assert encoder_input.size(0) == self.seq_len
+        assert decoder_input.size(0) == self.seq_len
+        assert label.size(0) == self.seq_len
+
+        return {
+            "encoder_input": encoder_input,  # (seq_len)
+            "decoder_input": decoder_input,  # (seq_len)
+            "encoder_mask": (encoder_input != self.pad_token).unsqueeze(0).unsqueeze(0).int(), # (1, 1, seq_len)
+            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0).int() & causal_mask(decoder_input.size(0)), # (1, seq_len) & (1, seq_len, seq_len),
+            "label": label,  # (seq_len)
+            "src_text": src_text,
+            "tgt_text": tgt_text,
+        }
     
-    Path(config['model_folder']).mkdir(parents=True, exist_ok=True)
-    
-    train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
-    model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
-    
-    # Tensorboard
-    writer = SummaryWriter(config['experiment_name'])
+def causal_mask(size):
+    mask = torch.triu(torch.ones((1, size, size)), diagonal=1).type(torch.int)
+    return mask == 0
