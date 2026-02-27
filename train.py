@@ -11,7 +11,7 @@ import warnings
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.trainers import WordLevelTrainer
-from tokenizers.pre_tokenizers import Whitespace, CharDelimiterSplit  # add CharDelimiterSplit
+from tokenizers.pre_tokenizers import Whitespace, BertPreTokenizer # add BertPreTokenizer
 
 from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
@@ -28,7 +28,7 @@ def get_or_build_tokenizer(config, ds, lang):
         tokenizer = Tokenizer(WordLevel(unk_token='[UNK]'))
         # changed: use character level for Chinese, whitespace for English
         if lang == 'zh':
-            tokenizer.pre_tokenizer = CharDelimiterSplit('')
+            tokenizer.pre_tokenizer = BertPreTokenizer()
         else:
             tokenizer.pre_tokenizer = Whitespace()
         trainer = WordLevelTrainer(special_tokens=["[UNK]", "[PAD]", "[SOS]", "[EOS]"], min_frequency=2)
