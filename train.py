@@ -136,6 +136,6 @@ def train_model(config):
         }, model_filename)
         
 if __name__ == "__main__":
-    warnings.filterwarning('ignore')
+    warnings.filterwarnings('ignore')
     config = get_config()
     train_model(config)
